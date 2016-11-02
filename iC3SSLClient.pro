@@ -4,7 +4,7 @@
 #
 #-------------------------------------------------
 
-QT       += core gui network printsupport sql
+QT       += core gui network sql
 
 TARGET = iC3SSLClient
 TEMPLATE = app
@@ -22,8 +22,7 @@ SOURCES += main.cpp\
         ./database/iC3_DatabaseColumnDef.cpp \
         ./database/iC3_TransducerTable.cpp \
 
-HEADERS  += mainwindow.h \
-            client.h \
+HEADERS  += client.h \
             QtJson.h \
             ./qcustomplot/qcustomplot.h \
             ./database/iC3_DatabaseTable.h \
