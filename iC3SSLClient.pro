@@ -4,7 +4,7 @@
 #
 #-------------------------------------------------
 
-QT       += core gui network sql
+QT       += widgets core gui network sql printsupport serialport
 
 TARGET = iC3SSLClient
 TEMPLATE = app
@@ -21,6 +21,7 @@ SOURCES += main.cpp\
         ./database/iC3_DMM_UtilityFunctions.cpp \
         ./database/iC3_DatabaseColumnDef.cpp \
         ./database/iC3_TransducerTable.cpp \
+        SerialPortThread.cpp
 
 HEADERS  += client.h \
             QtJson.h \
@@ -31,6 +32,6 @@ HEADERS  += client.h \
             ./database/iC3_DatabaseColumnDef.h \
             ./database/iC3_DMM_Constants.h \
             ./database/iC3_TransducerTable.h \
-
+            SerialPortThread.h
 
 FORMS    += client.ui

@@ -5,6 +5,9 @@
 #include <QList>
 #include "qcustomplot.h"
 
+#include <QtSerialPort>
+#include <QtSerialPort/QSerialPortInfo>
+
 
 Client::Client(QWidget *parent) :
     QMainWindow(parent),
@@ -27,9 +30,18 @@ Client::Client(QWidget *parent) :
     m_dPrimary(0.0),
     m_dSecondary(0.0),
     m_dControl(0.0),
-    m_dCompressor(0.0)
+    m_dCompressor(0.0),
+    m_dFlukeChannel1(0.0),
+    m_dFlukeChannel2(0.0),
+    m_sComPort("COM5"),
+    m_iWaitTimeoutMS(3000),
+    m_bWaitingForTimeout(false),
+    m_eLastFlukeMsgSent(eFLUKE_TC_UNKNOWN),
+    m_dRTD4_OffsetValue(0.0),
+    m_dRTD5_OffsetValue(0.0)
 {
   ui->setupUi(this);
+
 
   // Check for SSL support.  If SSL support is not available, show a
   // message to the user describing what to do to enable SSL support.
@@ -61,11 +73,8 @@ Client::Client(QWidget *parent) :
   // start oneMinTimer
   sendMessageTimer = new QTimer(this);
   connect(sendMessageTimer, SIGNAL(timeout()), this, SLOT(sendMessageTimeout()));
-  connDisTimer = new QTimer(this);
-  connect(connDisTimer, SIGNAL(timeout()), this, SLOT(connDisTimeout()));
 
   ui->dialLabel->setText(QString::number(m_iCurrentDialValue) + " ms");
-
 
   readRequestFile(REQUEST_STATUS_FILE, m_sRequest_Status);
   readRequestFile(REQUEST_LOCK_FILE, m_sRequest_Lock);
@@ -84,6 +93,19 @@ Client::Client(QWidget *parent) :
   m_ledON = (QPixmap::fromImage(ledON)).scaled(mySize);
   m_ledOFF = (QPixmap::fromImage(ledOFF)).scaled(mySize);
 
+  ui->button_control_down->setEnabled(false);
+  ui->button_control_up->setEnabled(false);
+  ui->button_light_off->setEnabled(false);
+  ui->button_light_on->setEnabled(false);
+  ui->button_lock->setEnabled(false);
+  ui->button_unlock->setEnabled(false);
+  ui->button_match_primary->setEnabled(false);
+  ui->button_peltier_low->setEnabled(false);
+  ui->button_peltier_high->setEnabled(false);
+  ui->button_peltier_stop->setEnabled(false);
+  ui->button_primary_down->setEnabled(false);
+  ui->button_primary_up->setEnabled(false);
+
   ui->led_power_state->setPixmap(m_ledOFF);
   ui->led_battery_state->setPixmap(m_ledOFF);
   ui->led_door_state->setPixmap(m_ledOFF);
@@ -93,6 +115,21 @@ Client::Client(QWidget *parent) :
   ui->led_secondary_probe->setPixmap(m_ledOFF);
   ui->led_control_probe->setPixmap(m_ledOFF);
   ui->led_compressor_probe->setPixmap(m_ledOFF);
+  ui->led_lock_state->setPixmap(m_ledOFF);
+  ui->led_defrost_active->setPixmap(m_ledOFF);
+
+  ui->lcd_primary->display("---");
+  ui->lcd_secondary->display("---");
+  ui->lcd_control->display("---");
+  ui->lcd_compressor->display("---");
+  ui->lcd_ac->display("---");
+  ui->lcd_battery->display("---");
+  ui->lcd_max->display("---");
+  ui->lcd_min->display("---");
+  ui->lcd_primary_offset->display("---");
+  ui->lcd_control_offset->display("---");
+  ui->lcd_fluke_1->display("---");
+  ui->lcd_fluke_2->display("---");
 
 //////////////////////////
 
@@ -113,11 +150,26 @@ Client::Client(QWidget *parent) :
 
   ui->graph->setBackground(Qt::gray);
 
+  ui->graph_fluke->addGraph()->setName("Channel 1");
+  ui->graph_fluke->graph(0)->setPen(QPen(QColor(40, 110, 255))); // blue line
+
+  ui->graph_fluke->addGraph()->setName("Channel 2");
+  ui->graph_fluke->graph(1)->setPen(QPen(QColor(147, 214, 85))); // green line
+
+  ui->graph_fluke->legend->setVisible(true);
+
+  ui->graph_fluke->setBackground(Qt::gray);
+
+
   // create and prepare a text layout element:
   QCPTextElement *legendTitle = new QCPTextElement(ui->graph);
   legendTitle->setLayer(ui->graph->legend->layer()); // place text element on same layer as legend, or it ends up below legend
-  legendTitle->setText("Engine Status");
   legendTitle->setFont(QFont("sans", 9, QFont::Bold));
+
+  // create and prepare a text layout element:
+  QCPTextElement *legendTitle2 = new QCPTextElement(ui->graph_fluke);
+  legendTitle2->setLayer(ui->graph_fluke->legend->layer()); // place text element on same layer as legend, or it ends up below legend
+  legendTitle2->setFont(QFont("sans", 9, QFont::Bold));
 
 
   QSharedPointer<QCPAxisTickerTime> timeTicker(new QCPAxisTickerTime);
@@ -126,12 +178,31 @@ Client::Client(QWidget *parent) :
   ui->graph->axisRect()->setupFullAxesBox();
   ui->graph->yAxis->setRange(0.0, 10.0);
 
+  QSharedPointer<QCPAxisTickerTime> timeTicker2(new QCPAxisTickerTime);
+  timeTicker2->setTimeFormat("%h:%m:%s");
+  ui->graph_fluke->xAxis->setTicker(timeTicker2);
+  ui->graph_fluke->axisRect()->setupFullAxesBox();
+  ui->graph_fluke->yAxis->setRange(0.0, 10.0);
+
 
   // make left and bottom axes transfer their ranges to right and top axes:
   connect(ui->graph->xAxis, SIGNAL(rangeChanged(QCPRange)), ui->graph->xAxis2, SLOT(setRange(QCPRange)));
   connect(ui->graph->yAxis, SIGNAL(rangeChanged(QCPRange)), ui->graph->yAxis2, SLOT(setRange(QCPRange)));
 
+  // make left and bottom axes transfer their ranges to right and top axes:
+  connect(ui->graph_fluke->xAxis, SIGNAL(rangeChanged(QCPRange)), ui->graph_fluke->xAxis2, SLOT(setRange(QCPRange)));
+  connect(ui->graph_fluke->yAxis, SIGNAL(rangeChanged(QCPRange)), ui->graph_fluke->yAxis2, SLOT(setRange(QCPRange)));
+
   db.openDatabase();
+
+  connect(&flukeTimer, SIGNAL(timeout()), this, SLOT(flukeTempTimeout()));
+
+  m_bSerialPortFound = findSerialPort();
+
+  // ---------------------------------------------------------
+  connect(&m_SerialPort, SIGNAL(response(QByteArray)), this, SLOT(handleResponse(QByteArray)));
+  connect(&m_SerialPort, SIGNAL(error(QString)), this, SLOT(handleSerialPortError(QString)));
+  connect(&m_SerialPort, SIGNAL(timeout(QString)), this, SLOT(handleTimeout(QString)));
 
 }
 
@@ -214,6 +285,23 @@ void Client::connectedToServer()
   ui->sendButton->setEnabled(true);
   ui->sendContButton->setEnabled(true);
   ui->stopButton->setEnabled(true);
+
+
+  ui->button_control_down->setEnabled(true);
+  ui->button_control_up->setEnabled(true);
+  ui->button_light_off->setEnabled(true);
+  ui->button_light_on->setEnabled(true);
+  ui->button_lock->setEnabled(true);
+  ui->button_unlock->setEnabled(true);
+  ui->button_match_primary->setEnabled(true);
+  ui->button_peltier_low->setEnabled(true);
+  ui->button_peltier_high->setEnabled(true);
+  ui->button_peltier_stop->setEnabled(true);
+  ui->button_primary_down->setEnabled(true);
+  ui->button_primary_up->setEnabled(true);
+
+
+
   ui->chatDisplayTextEdit->clear();
 
   if (conButtonClicked)
@@ -290,6 +378,10 @@ void Client::receiveMessage()
         ui->lcd_primary->display(s);
         m_dPrimary = s.toDouble();
 
+        s = result["primaryProbeOffset"].toString();
+        ui->lcd_primary_offset->display(s);
+        m_dRTD5_OffsetValue = s.toDouble();
+
         s = result["secondaryProbeTemp"].toString();
         ui->lcd_secondary->display(s);
         m_dSecondary = s.toDouble();
@@ -297,6 +389,10 @@ void Client::receiveMessage()
         s = result["controlProbeTemp"].toString();
         ui->lcd_control->display(s);
         m_dControl = s.toDouble();
+
+        s = result["controlProbeOffset"].toString();
+        ui->lcd_control_offset->display(s);
+        m_dRTD4_OffsetValue = s.toDouble();
 
         s = result["compressorProbeTemp"].toString();
         ui->lcd_compressor->display(s);
@@ -383,11 +479,31 @@ void Client::receiveMessage()
         else
             ui->led_compressor_probe->setPixmap(m_ledON);
 
+        s = result["compressorState"].toString();
+        ui->label_compressor_state->setText(s);
+
+        s = result["lockState"].toString();
+        ui->label_lock_state->setText(s);
+        if(s.compare("locked")==0)
+            ui->led_lock_state->setPixmap(m_ledOFF);
+        else
+            ui->led_lock_state->setPixmap(m_ledON);
+
+        s = result["defrostStatus"].toString();
+        ui->label_defrost_state->setText(s);
+        if(s.compare("off")==0)
+            ui->led_defrost_active->setPixmap(m_ledOFF);
+        else
+            ui->led_defrost_active->setPixmap(m_ledON);
+
+
         db.insertTransducerEntry(m_dCompressor,
                                  m_dSecondary,
                                  UNUSED_PROBE_VALUE,
                                  m_dControl,
                                  m_dPrimary);
+
+
     }
 
   //}
@@ -421,7 +537,45 @@ void Client::connectionClosed()
   ui->sendButton->setEnabled(false);
   ui->sendContButton->setEnabled(false);
   ui->stopButton->setEnabled(false);
+
+  ui->button_control_down->setEnabled(false);
+  ui->button_control_up->setEnabled(false);
+  ui->button_light_off->setEnabled(false);
+  ui->button_light_on->setEnabled(false);
+  ui->button_lock->setEnabled(false);
+  ui->button_unlock->setEnabled(false);
+  ui->button_match_primary->setEnabled(false);
+  ui->button_peltier_low->setEnabled(false);
+  ui->button_peltier_high->setEnabled(false);
+  ui->button_peltier_stop->setEnabled(false);
+  ui->button_primary_down->setEnabled(false);
+  ui->button_primary_up->setEnabled(false);
+
+  ui->led_power_state->setPixmap(m_ledOFF);
+  ui->led_battery_state->setPixmap(m_ledOFF);
+  ui->led_door_state->setPixmap(m_ledOFF);
+  ui->led_peltier_active->setPixmap(m_ledOFF);
+  ui->led_door_alarm->setPixmap(m_ledOFF);
+  ui->led_primary_probe->setPixmap(m_ledOFF);
+  ui->led_secondary_probe->setPixmap(m_ledOFF);
+  ui->led_control_probe->setPixmap(m_ledOFF);
+  ui->led_compressor_probe->setPixmap(m_ledOFF);
+
+  ui->lcd_primary->display("---");
+  ui->lcd_secondary->display("---");
+  ui->lcd_control->display("---");
+  ui->lcd_compressor->display("---");
+  ui->lcd_ac->display("---");
+  ui->lcd_battery->display("---");
+  ui->lcd_max->display("---");
+  ui->lcd_min->display("---");
+  ui->lcd_primary_offset->display("---");
+  ui->lcd_control_offset->display("---");
+  ui->lcd_fluke_1->display("---");
+  ui->lcd_fluke_2->display("---");
+
   sendMessageTimer->stop();
+  flukeTimer.stop();
 
   if (conButtonClicked)
   {
@@ -432,7 +586,7 @@ void Client::connectionClosed()
 
 void Client::socketError()
 {
-  ui->chatDisplayTextEdit->setText(QString("Socket Error: %1").arg(socket.errorString()));
+  ui->chatDisplayTextEdit->setText(QString("Socket Er  flukeTimer.start(TIMEOUT_FLUKE_TEMP_UPDATE_SEC*1000);ror: %1").arg(socket.errorString()));
   if (socket.state() != QAbstractSocket::ConnectedState)
   {
     connectionClosed();
@@ -449,6 +603,7 @@ void Client::on_dial_valueChanged(int value)
 void Client::on_sendContButton_clicked()
 {
     sendMessageTimer->start(m_iCurrentDialValue);
+    flukeTimer.start(TIMEOUT_FLUKE_TEMP_UPDATE_SEC*1000);
 
     if (!dataTimer.isActive())
     {
@@ -477,25 +632,7 @@ void Client::sendMessageTimeout()
 void Client::on_stopButton_clicked()
 {
     sendMessageTimer->stop();
-}
-
-
-void Client::connDisTimeout()
-{
-    if (socket.state() == QAbstractSocket::UnconnectedState)
-    {
-      // Initiate an SSL connection to the chat server.
-      socket.connectToHostEncrypted(ui->hostnameLineEdit->text(), ui->portSpinBox->value());
-      //contConnects++;
-      //ui->numConLabel->setText(QString::number(contConnects));
-    }
-
-    else
-    {
-      socket.close();
-      //contDisconnects++;
-      //ui->numDisLabel->setText(QString::number(contDisconnects));
-    }
+    flukeTimer.stop();
 }
 
 void Client::on_button_lock_clicked()
@@ -584,11 +721,17 @@ void Client::realtimeDataSlot()
         ui->graph->graph(2)->addData(key, m_dControl);
         ui->graph->graph(3)->addData(key, m_dCompressor);
 
+        ui->graph_fluke->graph(0)->addData(key, m_dFlukeChannel1);
+        ui->graph_fluke->graph(1)->addData(key, m_dFlukeChannel2);
+
       // rescale value (vertical) axis to fit the current data:
         ui->graph->graph(0)->rescaleValueAxis(true);
         ui->graph->graph(1)->rescaleValueAxis(true);
         ui->graph->graph(2)->rescaleValueAxis(true);
         ui->graph->graph(3)->rescaleValueAxis(true);
+
+        ui->graph_fluke->graph(0)->rescaleValueAxis(true);
+        ui->graph_fluke->graph(1)->rescaleValueAxis(true);
       //lastPointKey = key;
     //}
     // make key axis range scroll with the data (at a constant range size of 8):
@@ -597,26 +740,434 @@ void Client::realtimeDataSlot()
 
 
     ui->graph->xAxis->setRange(key, GRAPH_X_AXIS_MINUTES*60, Qt::AlignRight);
+    ui->graph_fluke->xAxis->setRange(key, GRAPH_X_AXIS_MINUTES*60, Qt::AlignRight);
 
 
     ui->graph->replot();
+    ui->graph_fluke->replot();
 
-
-
-
-    // calculate frames per second:
-//    static double lastFpsKey;
-//    static int frameCount;
-//    ++frameCount;
-//    if (key-lastFpsKey > 2) // average fps over 2 seconds
-//    {
-//      ui->statusBar->showMessage(
-//            QString("%1 FPS, Total Data points: %2")
-//            .arg(frameCount/(key-lastFpsKey), 0, 'f', 0)
-//            .arg(ui->graph->graph(0)->data()->size()+ui->graph->graph(1)->data()->size())
-//            , 0);
-//      lastFpsKey = key;
-//      frameCount = 0;
-//    }
 }
 
+//-----------------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------------------------------------------------------------
+void Client::sendSerialRequest( QString sPortName, int iWaitTimeoutMS, QByteArray baRequest )
+{
+    m_SerialPort.transaction( sPortName, iWaitTimeoutMS, baRequest );
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------------------------------------------------------------
+void Client::handleResponse( QByteArray baResponse )
+{
+    m_bWaitingForTimeout = false;
+
+//    qDebug() << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++";
+//    qDebug() << "   Serial Port Response";
+//    qDebug() << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++";
+    QString sResponse = QString(baResponse);
+    sResponse.replace("\r", "");
+    sResponse.replace("\n", "");
+//    qDebug() << sResponse;
+//    qDebug() << "+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++";
+
+    float fTemp;
+
+    if( sResponse.contains("e+") )
+    {
+//        qDebug() << "HAS -> e+";
+        fTemp = sResponse.toFloat();
+    }
+    else
+    {
+        qDebug() << "?????????";
+        if (m_eLastFlukeMsgSent == eFLUKE_TC_1)
+        {
+            ui->lcd_fluke_1->display(QString("---"));
+        }
+        else if (m_eLastFlukeMsgSent == eFLUKE_TC_2)
+        {
+            ui->lcd_fluke_2->display(QString("---"));
+        }
+        return;
+    }
+
+//    qDebug() << "TEMP: " << fTemp;
+
+    if (m_eLastFlukeMsgSent == eFLUKE_TC_1)
+    {
+        m_dFlukeChannel1 = fTemp;
+        ui->lcd_fluke_1->display(QString::number(fTemp,'f',1));
+    }
+    else if (m_eLastFlukeMsgSent == eFLUKE_TC_2)
+    {
+        m_dFlukeChannel2 = fTemp;
+        ui->lcd_fluke_2->display(QString::number(fTemp,'f',1));
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------------------------------------------------------------
+void Client::handleSerialPortError( QString sError )
+{
+    qWarning() << sError;
+    qDebug() << "Serial Port Error: " << sError;
+    m_bWaitingForTimeout = false;
+}
+
+//-------------------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------------------------------------------------------------
+void Client::handleTimeout( QString sMessage )
+{
+    qDebug() << "Serial Port Timeout: " << sMessage;
+    m_bWaitingForTimeout = false;
+
+    ui->lcd_fluke_1->display("---");
+    ui->lcd_fluke_2->display("---");
+
+    // ---------------------------------------------------------
+    disconnect(&m_SerialPort, SIGNAL(response(QByteArray)), this, SLOT(handleResponse(QByteArray)));
+    disconnect(&m_SerialPort, SIGNAL(error(QString)), this, SLOT(handleSerialPortError(QString)));
+    disconnect(&m_SerialPort, SIGNAL(timeout(QString)), this, SLOT(handleTimeout(QString)));
+
+    m_bSerialPortFound = findSerialPort();
+
+    connect(&m_SerialPort, SIGNAL(response(QByteArray)), this, SLOT(handleResponse(QByteArray)));
+    connect(&m_SerialPort, SIGNAL(error(QString)), this, SLOT(handleSerialPortError(QString)));
+    connect(&m_SerialPort, SIGNAL(timeout(QString)), this, SLOT(handleTimeout(QString)));
+
+
+}
+
+
+void Client::flukeTempTimeout( void )
+{
+    if ( m_eLastFlukeMsgSent == eFLUKE_TC_1 )
+    {
+        getFlukeTemp2();
+    }
+    else if ( m_eLastFlukeMsgSent == eFLUKE_TC_2 )
+    {
+        getFlukeTemp1();
+    }
+    else
+    {
+        getFlukeTemp1();
+    }
+}
+
+//-----------------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------------------------------------------------------------
+void Client::getFlukeTemp1( void )
+{
+    m_eLastFlukeMsgSent = eFLUKE_TC_1;
+
+    if ( m_bWaitingForTimeout == false )
+    {
+        QByteArray baFlukeTempReq;
+
+        const char FLUKE_TEMP_1_COMMAND[]   = {"MEAS:TEMP? TC,T,(@101)\r\n"};
+        baFlukeTempReq.clear();
+        baFlukeTempReq.append( FLUKE_TEMP_1_COMMAND, strlen(FLUKE_TEMP_1_COMMAND) );
+//        qDebug() << "===========================================================";
+//        qDebug() << "  getFlukeTemp1 ";
+//        qDebug() << "===========================================================";
+//        qDebug() << baFlukeTempReq ;
+//        qDebug() << "===========================================================";
+
+        sendSerialRequest(m_sComPort, m_iWaitTimeoutMS, baFlukeTempReq );
+        m_bWaitingForTimeout = true;
+    }
+    else
+    {
+        qWarning() << "Can not send the getFlukeTemp1 command - waiting for previous serial port command response";
+    }
+}
+//-----------------------------------------------------------------------------------------------------------------
+void Client::getFlukeTemp2( void )
+{
+    m_eLastFlukeMsgSent = eFLUKE_TC_2;
+
+    if ( m_bWaitingForTimeout == false )
+    {
+        QByteArray baFlukeTempReq;
+
+        const char FLUKE_TEMP_2_COMMAND[]   = {"MEAS:TEMP? TC,T,(@102)\r\n"};
+        baFlukeTempReq.clear();
+        baFlukeTempReq.append( FLUKE_TEMP_2_COMMAND, strlen(FLUKE_TEMP_2_COMMAND) );
+//        qDebug() << "===========================================================";
+//        qDebug() << "  getFlukeTemp2 ";
+//        qDebug() << "===========================================================";
+//        qDebug() << baFlukeTempReq ;
+//        qDebug() << "===========================================================";
+
+        sendSerialRequest(m_sComPort, m_iWaitTimeoutMS, baFlukeTempReq );
+        m_bWaitingForTimeout = true;
+    }
+    else
+    {
+        qWarning() << "Can not send the getFlukeTemp2 command - waiting for previous serial port command response";
+    }
+}
+
+
+//-----------------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------------------------------------------------------------
+void Client::turnLightOn(void)
+{
+    if ( m_bWaitingForTimeout == false )
+    {
+        qDebug() << "===========================================================";
+        qDebug() << "  Sending Light On";
+        qDebug() << "===========================================================";
+        qDebug() << byteArrayToHexString( m_baLightOn );
+        qDebug() << "===========================================================";
+
+        sendSerialRequest(m_sComPort, m_iWaitTimeoutMS, m_baLightOn );
+        m_bWaitingForTimeout = true;
+    }
+    else
+    {
+        qWarning() << "Can not send the light on command - waiting for previous serial port command response";
+    }
+}
+
+
+//-----------------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------------------------------------------------------------
+void Client::turnLightOff( void )
+{
+    if ( m_bWaitingForTimeout == false )
+    {
+        qDebug() << "===========================================================";
+        qDebug() << "  Sending Light Off";
+        qDebug() << "===========================================================";
+        qDebug() << byteArrayToHexString( m_baLightOff );
+        qDebug() << "===========================================================";
+
+        sendSerialRequest(m_sComPort, m_iWaitTimeoutMS, m_baLightOff );
+        m_bWaitingForTimeout = true;
+    }
+    else
+    {
+        qWarning() << "Can not send the light off command - waiting for previous serial port command response";
+    }
+}
+
+//-----------------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------------------------------------------------------------
+void Client::setSerialPortName( QString sSerialPortName )
+{
+    m_sComPort = sSerialPortName;
+}
+
+//-----------------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------------------------------------------------------------
+void Client::setWaitTimeoutMS( int iTimeoutMS )
+{
+    m_iWaitTimeoutMS = iTimeoutMS;
+}
+
+//-----------------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------------------------------------------------------------
+bool Client::findSerialPort( void )
+{
+    bool bRC = false;
+    QSerialPort serial;
+    QString sPortName;
+    QSerialPortInfo info;
+
+    QList<QSerialPortInfo> infos = QSerialPortInfo::availablePorts();
+    QListIterator<QSerialPortInfo> i(infos);
+    while (i.hasNext())
+    {
+        info = i.next();
+        sPortName = info.portName();
+        qDebug() << "Trying Serial Port: " << sPortName;
+        serial.close();
+        serial.setPortName(sPortName);
+
+        bRC = serial.open(QIODevice::ReadWrite);
+
+        if ( bRC == true )
+        {
+            setSerialPortName( sPortName );
+            qDebug() << "Using Serial Port: " << sPortName;
+            serial.close();
+            break;
+        }
+        else
+        {
+            qDebug() << "Serial Port: " << sPortName << " not connected: " << serial.errorString();
+        }
+    }
+
+    serial.close();
+
+    return bRC;
+}
+
+//-----------------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------------------------------------------------------------
+bool Client::isSerialPortFound( void )
+{
+    return m_bSerialPortFound;
+}
+
+//-----------------------------------------------------------------------------------------------------------------
+//-----------------------------------------------------------------------------------------------------------------
+QString Client::byteArrayToHexString( QByteArray & buffer )
+{
+    int iIndex;
+    QString sReturnString;
+    QString sTempString = buffer.toHex().toUpper();
+    int iBuffSize = sTempString.size();
+
+    for ( iIndex = 0; iIndex < iBuffSize; iIndex+=2 )
+    {
+        //sReturnString.append("0x");
+        sReturnString.append( sTempString.mid(iIndex, 2) );
+        sReturnString.append(" ");
+    }
+
+    return sReturnString;
+}
+
+void Client::sendCalibrationRequest(eRTDNumber eRTDNum , double dRTDOffsetVal)
+{
+    QString sOffset = QString::number(dRTDOffsetVal,'f',1);
+
+
+    QString sJSON = "{\n";
+    if ( eRTDNum == eRTD4 )
+    {
+        sJSON.append("\"RTD4Offset\":\"");
+    }
+    else if ( eRTDNum == eRTD5 )
+    {
+        sJSON.append("\"RTD5Offset\":\"");
+    }
+    else
+    {
+        qDebug() << "Client::packageCalibrationRequest - INVALID";
+        return;
+    }
+    sJSON.append(sOffset);
+    sJSON.append("\"\n}");
+
+
+    QString sJSONLength = QString::number(sJSON.length());
+
+    QString sFullMsg;
+    sFullMsg.append("PUT /eqc/v1/calibration HTTP/1.1\n");
+    sFullMsg.append("Authorization: Basic SGVsbWVyOkFwcGxlMTIzNDU=\n");
+    sFullMsg.append("Host: 192.168.0.3:5090\n");
+    sFullMsg.append("Content-Length: ");
+    sFullMsg.append(sJSONLength);
+    sFullMsg.append("\n\n");
+    sFullMsg.append(sJSON);
+
+//    qDebug() << "-----------------------------";
+//    qDebug() << sFullMsg;
+//    qDebug() << "-----------------------------";
+
+    msgsSentCount++;
+    socket.write(sFullMsg.toLocal8Bit().constData());
+}
+
+void Client::on_button_match_primary_clicked()
+{
+
+    // (REFERENCE READING [CHANNEL 1]) - (IC3 READING [PRIMARY PROBE]) = 'OFFSET_DELTA'
+    double fOffsetDelta = m_dFlukeChannel1 - m_dPrimary;
+
+    // VALIDATE VALUE +/- 10.0
+    if ( fOffsetDelta <= -10.0 ||
+         fOffsetDelta >= 10.0 )
+    {
+        return;
+    }
+    m_dRTD5_OffsetValue = m_dRTD5_OffsetValue + fOffsetDelta;
+
+    // SEND 'OFFSET_DELTA' VALUE INTO CALIBRATION REQUEST (FOR RTD5)
+    sendCalibrationRequest(eRTD5, m_dRTD5_OffsetValue);
+
+    // UPDATE OFFSET VALUE ON GUI
+    ui->lcd_primary_offset->display(QString::number(m_dRTD5_OffsetValue,'f',1));
+
+}
+
+void Client::on_button_primary_up_clicked()
+{
+    // VALIDATE VALUE +/- 10.0
+    if ( m_dRTD5_OffsetValue <= -10.0 ||
+         m_dRTD5_OffsetValue >= 10.0 )
+    {
+        return;
+    }
+
+    // INCREMENT CURRENT RTD5 OFFSET VALUE
+    m_dRTD5_OffsetValue = m_dRTD5_OffsetValue + 0.1;
+
+    // SEND OFFSET VALUE INTO CALIBRATION REQUEST (FOR RTD5)
+    sendCalibrationRequest(eRTD5, m_dRTD5_OffsetValue);
+
+    // UPDATE OFFSET VALUE ON GUI
+    ui->lcd_primary_offset->display(QString::number(m_dRTD5_OffsetValue,'f',1));
+}
+
+void Client::on_button_primary_down_clicked()
+{
+    // VALIDATE VALUE +/- 10.0
+    if ( m_dRTD5_OffsetValue <= -10.0 ||
+         m_dRTD5_OffsetValue >= 10.0 )
+    {
+        return;
+    }
+
+    // DECREMENT CURRENT RTD5 OFFSET VALUE
+    m_dRTD5_OffsetValue = m_dRTD5_OffsetValue - 0.1;
+
+    // SEND OFFSET VALUE INTO CALIBRATION REQUEST (FOR RTD5)
+    sendCalibrationRequest(eRTD5, m_dRTD5_OffsetValue);
+
+    // UPDATE OFFSET VALUE ON GUI
+    ui->lcd_primary_offset->display(QString::number(m_dRTD5_OffsetValue,'f',1));
+}
+
+void Client::on_button_control_up_clicked()
+{
+    // VALIDATE VALUE +/- 10.0
+    if ( m_dRTD4_OffsetValue <= -10.0 ||
+         m_dRTD4_OffsetValue >= 10.0 )
+    {
+        return;
+    }
+
+    // INCREMENT CURRENT RTD4 OFFSET VALUE
+    m_dRTD4_OffsetValue = m_dRTD4_OffsetValue + 0.1;
+
+    // SEND OFFSET VALUE INTO CALIBRATION REQUEST (FOR RTD4)
+    sendCalibrationRequest(eRTD4, m_dRTD4_OffsetValue);
+
+    // UPDATE OFFSET VALUE ON GUI
+    ui->lcd_control_offset->display(QString::number(m_dRTD4_OffsetValue,'f',1));
+}
+
+void Client::on_button_control_down_clicked()
+{
+    // VALIDATE VALUE +/- 10.0
+    if ( m_dRTD4_OffsetValue <= -10.0 ||
+         m_dRTD4_OffsetValue >= 10.0 )
+    {
+        return;
+    }
+
+    // DECREMENT CURRENT RTD4 OFFSET VALUE
+    m_dRTD4_OffsetValue = m_dRTD4_OffsetValue - 0.1;
+
+    // SEND OFFSET VALUE INTO CALIBRATION REQUEST (FOR RTD4)
+    sendCalibrationRequest(eRTD4, m_dRTD4_OffsetValue);
+
+    // UPDATE OFFSET VALUE ON GUI
+    ui->lcd_control_offset->display(QString::number(m_dRTD4_OffsetValue,'f',1));
+}
