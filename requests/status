@@ -1,4 +1,4 @@
-GET /eqc/v1/status HTTP/1.1
+GET /eqc/v2/status HTTP/1.1
 Host: 192.168.0.3:5090
 Authorization: Basic SGVsbWVyOkFwcGxlMTIzNDU=
 Accept: application/json
