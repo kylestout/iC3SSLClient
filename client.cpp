@@ -38,10 +38,18 @@ Client::Client(QWidget *parent) :
     m_bWaitingForTimeout(false),
     m_eLastFlukeMsgSent(eFLUKE_TC_UNKNOWN),
     m_dRTD4_OffsetValue(0.0),
-    m_dRTD5_OffsetValue(0.0)
+    m_dRTD5_OffsetValue(0.0),
+    m_bCompressorState(false),
+    m_sDeviceType(""),
+    m_pCalibrationManager(NULL)
 {
   ui->setupUi(this);
 
+  qDebug() << "\n\n\n\n";
+  qDebug() << "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%";
+  qDebug() << "SYSTEM START";
+  qDebug() << "%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%";
+  qDebug() << "\n\n\n\n";
 
   // Check for SSL support.  If SSL support is not available, show a
   // message to the user describing what to do to enable SSL support.
@@ -105,6 +113,7 @@ Client::Client(QWidget *parent) :
   ui->button_peltier_stop->setEnabled(false);
   ui->button_primary_down->setEnabled(false);
   ui->button_primary_up->setEnabled(false);
+  ui->button_auto_cal->setEnabled(false);
 
   ui->led_power_state->setPixmap(m_ledOFF);
   ui->led_battery_state->setPixmap(m_ledOFF);
@@ -117,6 +126,7 @@ Client::Client(QWidget *parent) :
   ui->led_compressor_probe->setPixmap(m_ledOFF);
   ui->led_lock_state->setPixmap(m_ledOFF);
   ui->led_defrost_active->setPixmap(m_ledOFF);
+  ui->led_calibrated->setPixmap(m_ledOFF);
 
   ui->lcd_primary->display("---");
   ui->lcd_secondary->display("---");
@@ -299,6 +309,7 @@ void Client::connectedToServer()
   ui->button_peltier_stop->setEnabled(true);
   ui->button_primary_down->setEnabled(true);
   ui->button_primary_up->setEnabled(true);
+  ui->button_auto_cal->setEnabled(true);
 
 
 
@@ -400,6 +411,7 @@ void Client::receiveMessage()
 
         s = result["deviceType"].toString();
         ui->device_type_label->setText(s);
+        m_sDeviceType = s;
 
         s = result["acVolt"].toString();
         ui->lcd_ac->display(s);
@@ -481,6 +493,10 @@ void Client::receiveMessage()
 
         s = result["compressorState"].toString();
         ui->label_compressor_state->setText(s);
+        if(s.compare("off")==0)
+            m_bCompressorState = false;
+        else
+            m_bCompressorState = true;
 
         s = result["lockState"].toString();
         ui->label_lock_state->setText(s);
@@ -496,13 +512,36 @@ void Client::receiveMessage()
         else
             ui->led_defrost_active->setPixmap(m_ledON);
 
-
         db.insertTransducerEntry(m_dCompressor,
                                  m_dSecondary,
                                  UNUSED_PROBE_VALUE,
                                  m_dControl,
                                  m_dPrimary);
 
+        if ( m_pCalibrationManager != NULL )
+        {
+            eCalibrationStates eState = m_pCalibrationManager->getCalibrationState();
+            if ( eState == eCALIBRATION_STATE_TEMPERATURE_UNSTABLE )
+            {
+                ui->label_calibration_state->setText("Unstable");
+                ui->led_calibrated->setPixmap(m_ledON);
+            }
+            else if ( eState == eCALIBRATION_STATE_TEMPERATURE_STABLE )
+            {
+                ui->label_calibration_state->setText("Calibrating");
+                ui->led_calibrated->setPixmap(m_ledON);
+            }
+            else if ( eState == eCALIBRATION_STATE_CALIBRATED )
+            {
+                ui->label_calibration_state->setText("Calibrated!");
+                ui->led_calibrated->setPixmap(m_ledOFF);
+            }
+            else
+            {
+                ui->label_calibration_state->setText("---");
+                ui->led_calibrated->setPixmap(m_ledON);
+            }
+        }
 
     }
 
@@ -550,6 +589,7 @@ void Client::connectionClosed()
   ui->button_peltier_stop->setEnabled(false);
   ui->button_primary_down->setEnabled(false);
   ui->button_primary_up->setEnabled(false);
+  ui->button_auto_cal->setEnabled(false);
 
   ui->led_power_state->setPixmap(m_ledOFF);
   ui->led_battery_state->setPixmap(m_ledOFF);
@@ -560,6 +600,7 @@ void Client::connectionClosed()
   ui->led_secondary_probe->setPixmap(m_ledOFF);
   ui->led_control_probe->setPixmap(m_ledOFF);
   ui->led_compressor_probe->setPixmap(m_ledOFF);
+  ui->led_calibrated->setPixmap(m_ledOFF);
 
   ui->lcd_primary->display("---");
   ui->lcd_secondary->display("---");
@@ -779,7 +820,7 @@ void Client::handleResponse( QByteArray baResponse )
     }
     else
     {
-        qDebug() << "?????????";
+        qWarning() << "Serial Port Response Error: " << sResponse;
         if (m_eLastFlukeMsgSent == eFLUKE_TC_1)
         {
             ui->lcd_fluke_1->display(QString("---"));
@@ -843,21 +884,21 @@ void Client::flukeTempTimeout( void )
 {
     if ( m_eLastFlukeMsgSent == eFLUKE_TC_1 )
     {
-        getFlukeTemp2();
+        readFlukeTemp2();
     }
     else if ( m_eLastFlukeMsgSent == eFLUKE_TC_2 )
     {
-        getFlukeTemp1();
+        readFlukeTemp1();
     }
     else
     {
-        getFlukeTemp1();
+        readFlukeTemp1();
     }
 }
 
 //-----------------------------------------------------------------------------------------------------------------
 //-----------------------------------------------------------------------------------------------------------------
-void Client::getFlukeTemp1( void )
+void Client::readFlukeTemp1( void )
 {
     m_eLastFlukeMsgSent = eFLUKE_TC_1;
 
@@ -869,7 +910,7 @@ void Client::getFlukeTemp1( void )
         baFlukeTempReq.clear();
         baFlukeTempReq.append( FLUKE_TEMP_1_COMMAND, strlen(FLUKE_TEMP_1_COMMAND) );
 //        qDebug() << "===========================================================";
-//        qDebug() << "  getFlukeTemp1 ";
+//        qDebug() << "  readFlukeTemp1 ";
 //        qDebug() << "===========================================================";
 //        qDebug() << baFlukeTempReq ;
 //        qDebug() << "===========================================================";
@@ -879,34 +920,29 @@ void Client::getFlukeTemp1( void )
     }
     else
     {
-        qWarning() << "Can not send the getFlukeTemp1 command - waiting for previous serial port command response";
+        qWarning() << "Can not send the readFlukeTemp1 command - waiting for previous serial port command response";
     }
 }
 //-----------------------------------------------------------------------------------------------------------------
-void Client::getFlukeTemp2( void )
+void Client::readFlukeTemp2( void )
 {
     m_eLastFlukeMsgSent = eFLUKE_TC_2;
 
-    if ( m_bWaitingForTimeout == false )
-    {
-        QByteArray baFlukeTempReq;
+//    if ( m_bWaitingForTimeout == false )
+//    {
+//        QByteArray baFlukeTempReq;
 
-        const char FLUKE_TEMP_2_COMMAND[]   = {"MEAS:TEMP? TC,T,(@102)\r\n"};
-        baFlukeTempReq.clear();
-        baFlukeTempReq.append( FLUKE_TEMP_2_COMMAND, strlen(FLUKE_TEMP_2_COMMAND) );
-//        qDebug() << "===========================================================";
-//        qDebug() << "  getFlukeTemp2 ";
-//        qDebug() << "===========================================================";
-//        qDebug() << baFlukeTempReq ;
-//        qDebug() << "===========================================================";
+//        const char FLUKE_TEMP_2_COMMAND[]   = {"MEAS:TEMP? TC,T,(@102)\r\n"};
+//        baFlukeTempReq.clear();
+//        baFlukeTempReq.append( FLUKE_TEMP_2_COMMAND, strlen(FLUKE_TEMP_2_COMMAND) );
 
-        sendSerialRequest(m_sComPort, m_iWaitTimeoutMS, baFlukeTempReq );
-        m_bWaitingForTimeout = true;
-    }
-    else
-    {
-        qWarning() << "Can not send the getFlukeTemp2 command - waiting for previous serial port command response";
-    }
+//        sendSerialRequest(m_sComPort, m_iWaitTimeoutMS, baFlukeTempReq );
+//        m_bWaitingForTimeout = true;
+//    }
+//    else
+//    {
+//        qWarning() << "Can not send the getFlukeTemp2 command - waiting for previous serial port command response";
+//    }
 }
 
 
@@ -982,7 +1018,7 @@ bool Client::findSerialPort( void )
     {
         info = i.next();
         sPortName = info.portName();
-        qDebug() << "Trying Serial Port: " << sPortName;
+//        qDebug() << "Trying Serial Port: " << sPortName;
         serial.close();
         serial.setPortName(sPortName);
 
@@ -997,7 +1033,7 @@ bool Client::findSerialPort( void )
         }
         else
         {
-            qDebug() << "Serial Port: " << sPortName << " not connected: " << serial.errorString();
+//            qDebug() << "Serial Port: " << sPortName << " not connected: " << serial.errorString();
         }
     }
 
@@ -1066,9 +1102,9 @@ void Client::sendCalibrationRequest(eRTDNumber eRTDNum , double dRTDOffsetVal)
     sFullMsg.append("\n\n");
     sFullMsg.append(sJSON);
 
-//    qDebug() << "-----------------------------";
-//    qDebug() << sFullMsg;
-//    qDebug() << "-----------------------------";
+    qDebug() << "-----------------------------";
+    qDebug() << sFullMsg;
+    qDebug() << "-----------------------------";
 
     msgsSentCount++;
     socket.write(sFullMsg.toLocal8Bit().constData());
@@ -1170,4 +1206,61 @@ void Client::on_button_control_down_clicked()
 
     // UPDATE OFFSET VALUE ON GUI
     ui->lcd_control_offset->display(QString::number(m_dRTD4_OffsetValue,'f',1));
+}
+
+double Client::getFlukeTemp1()
+{
+    return m_dFlukeChannel1;
+}
+
+double Client::getPrimaryTemp()
+{
+    return m_dPrimary;
+}
+
+double Client::getControlTemp()
+{
+    return m_dControl;
+}
+
+double Client::getPrimaryOffset()
+{
+    return m_dRTD5_OffsetValue;
+}
+
+double Client::getControlOffset()
+{
+    return m_dRTD4_OffsetValue;
+}
+
+bool Client::getCompressorState()
+{
+    return m_bCompressorState;
+}
+
+QString Client::getDeviceType()
+{
+    return m_sDeviceType;
+}
+
+void Client::on_button_auto_cal_clicked()
+{
+    qDebug() << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~";
+    qDebug() << "AUTOMATIC CALIBRATION STARTED!!!";
+    qDebug() << "~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~";
+    m_pCalibrationManager = new CalibrationManager(this);
+    ui->button_auto_cal->setText("In Progress..");
+    ui->button_control_down->setEnabled(false);
+    ui->button_control_up->setEnabled(false);
+    ui->button_light_off->setEnabled(false);
+    ui->button_light_on->setEnabled(false);
+    ui->button_lock->setEnabled(false);
+    ui->button_unlock->setEnabled(false);
+    ui->button_match_primary->setEnabled(false);
+    ui->button_peltier_low->setEnabled(false);
+    ui->button_peltier_high->setEnabled(false);
+    ui->button_peltier_stop->setEnabled(false);
+    ui->button_primary_down->setEnabled(false);
+    ui->button_primary_up->setEnabled(false);
+    ui->button_auto_cal->setEnabled(false);
 }

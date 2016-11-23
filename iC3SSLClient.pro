@@ -21,7 +21,9 @@ SOURCES += main.cpp\
         ./database/iC3_DMM_UtilityFunctions.cpp \
         ./database/iC3_DatabaseColumnDef.cpp \
         ./database/iC3_TransducerTable.cpp \
-        SerialPortThread.cpp
+        SerialPortThread.cpp \
+        CalibrationManager.cpp \
+        ErrorLogFile.cpp
 
 HEADERS  += client.h \
             QtJson.h \
@@ -32,6 +34,8 @@ HEADERS  += client.h \
             ./database/iC3_DatabaseColumnDef.h \
             ./database/iC3_DMM_Constants.h \
             ./database/iC3_TransducerTable.h \
-            SerialPortThread.h
+            SerialPortThread.h \
+            CalibrationManager.h \
+            ErrorLogFile.h
 
 FORMS    += client.ui
