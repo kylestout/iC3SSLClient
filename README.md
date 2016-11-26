@@ -1,3 +1,3 @@
 # iC3SSLClient
 
-Developed using Qt 4.8.1 on Ubuntu 12.04 LTS
+Developed using Qt 5.1.0 on Ubuntu 12.04 LTS
