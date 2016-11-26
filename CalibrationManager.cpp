@@ -6,12 +6,9 @@ CalibrationManager::CalibrationManager(Client *pClient,
     m_pClient(pClient),
     QObject(parent),
     m_bCompressorState(false),
-//    m_bTemperatureStable(false),
     m_dControlTemperature(100.0),
     m_dFlukeChannel1Temperature(100.0),
     m_dPrimaryTemperature(100.0),
-//    m_dPrimaryTemperature_Previous(100.0),
-//    m_dPrimaryTemperatureDelta(100.0),
     m_dRTD4_OffsetValue(0.0),
     m_dRTD5_OffsetValue(0.0),
     m_iNumberCompressorCycles(-1),
@@ -71,7 +68,6 @@ void CalibrationManager::slot_FifteenMinuteTimeout()
         qWarning() << "ERROR! -> Temperature Delta: " << dPrimaryTemperatureDelta;
         qWarning() << "ERROR! -> Calibration State: " << getCalibrationState();
     }
-
 }
 
 void CalibrationManager::fixControlProbeOffset()
@@ -217,44 +213,112 @@ void CalibrationManager::compressorCycleStart()
 
     m_CycleDataList.append(data);
 
-    qDebug() << "m_CycleDataList.size() -> " << m_CycleDataList.size();
-
-    // ---------------------------------------  CHECK IF UNIT IS CALIBRATED ----------------------------------------------
-    bool bCalibrated = true;
-
-    if ( m_CycleDataList.size() >= COMPRESSOR_CYCLES_CHECK)
+    //if we have more than x # cycles in our m_CycleDataList, start checking if we are calibrated
+    if ( m_CycleDataList.size() >= COMPRESSOR_CYCLES_CALIBRATION_CHECK)
     {
-        int iIndexToStop = m_CycleDataList.size();
-        iIndexToStop = iIndexToStop - COMPRESSOR_CYCLES_CHECK;
-
-        for (int j = m_CycleDataList.size()-1; j >= iIndexToStop; j--)
-        {
-            if ( m_CycleDataList[j].dTempStart > (TEMPERATURE_SETPOINT_4C_REFRIGERATOR + CALIBRATED_TEMPERATURE_BUFFER) )
-            {
-                bCalibrated = false;
-            }
-            if ( m_CycleDataList[j].dTempStart < (TEMPERATURE_SETPOINT_4C_REFRIGERATOR - CALIBRATED_TEMPERATURE_BUFFER) )
-            {
-                bCalibrated = false;
-            }
-            if ( m_CycleDataList[j].dTempEnd > (TEMPERATURE_SETPOINT_4C_REFRIGERATOR + CALIBRATED_TEMPERATURE_BUFFER) )
-            {
-                bCalibrated = false;
-            }
-            if ( m_CycleDataList[j].dTempEnd < (TEMPERATURE_SETPOINT_4C_REFRIGERATOR - CALIBRATED_TEMPERATURE_BUFFER) )
-            {
-                bCalibrated = false;
-            }
-        }
+        checkIfCalibrated();
     }
     else
     {
-        // not a large enough sample size yet
-        bCalibrated = false;
+        // not a large enough sample size yet to start checking for calibration
+        qDebug() << "m_CycleDataList.size() -> " << m_CycleDataList.size();
     }
 
+    // if we have x # cycles in our m_CycleDataList, and we are still not calibrated..
+    if ( (m_CycleDataList.size() >= COMPRESSOR_CYCLES_ADJUSTMENT_CHECK) &&
+         (getCalibrationState() != eCALIBRATION_STATE_CALIBRATED) )
+    {
+        checkIfAdjustmentsNeedMade();
+    }
+}
+
+void CalibrationManager::checkIfCalibrated()
+{
+    qDebug() << "CalibrationManager::checkIfCalibrated()";
+
+    double dSetpoint;
+    QString sDeviceType = m_pClient->getDeviceType();
+
+    if ( sDeviceType.contains("Refrig", Qt::CaseInsensitive) )
+    {
+         dSetpoint = TEMPERATURE_SETPOINT_4C_REFRIGERATOR;
+    }
+    else if ( sDeviceType.contains("Freezer", Qt::CaseInsensitive) )
+    {
+        dSetpoint = TEMPERATURE_SETPOINT_NEG_30C_FREEZER;
+    }
+    else
+    {
+        qWarning() << "UNKNOWN DEVICE TYPE!!";
+        return;
+    }
+
+    // assume we are calibrated and prove we are not (if we are not)
+    bool bCalibrated = true;
+
+    int iIndexToStop = m_CycleDataList.size();
+    iIndexToStop = iIndexToStop - COMPRESSOR_CYCLES_CALIBRATION_CHECK;
+
+    // iterate through the last x number of cycles in the m_CycleDataList to check if we are calibrated or not
+    for (int i = m_CycleDataList.size()-1; i >= iIndexToStop; i--)
+    {
+        if ( m_CycleDataList[i].dTempStart > (dSetpoint + CALIBRATED_TEMPERATURE_BUFFER) )
+        {
+            bCalibrated = false;
+        }
+        if ( m_CycleDataList[i].dTempStart < (dSetpoint - CALIBRATED_TEMPERATURE_BUFFER) )
+        {
+            bCalibrated = false;
+        }
+        if ( m_CycleDataList[i].dTempEnd > (dSetpoint + CALIBRATED_TEMPERATURE_BUFFER) )
+        {
+            bCalibrated = false;
+        }
+        if ( m_CycleDataList[i].dTempEnd < (dSetpoint - CALIBRATED_TEMPERATURE_BUFFER) )
+        {
+            bCalibrated = false;
+        }
+    }
+
+    // change system state if we are calibrated
     if ( bCalibrated )
     {
         setCalibrationState(eCALIBRATION_STATE_CALIBRATED);
     }
 }
+
+void CalibrationManager::checkIfAdjustmentsNeedMade()
+{
+    qDebug() << "CalibrationManager::checkIfAdjustmentsNeedMade()";
+
+    // if we are still not around our calibrated temperature goal, make further adjustments..
+    double dSetpoint;
+    QString sDeviceType = m_pClient->getDeviceType();
+
+    if ( sDeviceType.contains("Refrig", Qt::CaseInsensitive) )
+    {
+         dSetpoint = TEMPERATURE_SETPOINT_4C_REFRIGERATOR;
+    }
+    else if ( sDeviceType.contains("Freezer", Qt::CaseInsensitive) )
+    {
+        dSetpoint = TEMPERATURE_SETPOINT_NEG_30C_FREEZER;
+    }
+    else
+    {
+        qWarning() << "UNKNOWN DEVICE TYPE!!";
+        return;
+    }
+
+    double dPrimaryTemperature = m_pClient->getPrimaryTemp();
+
+    if ( dPrimaryTemperature > (dSetpoint + CALIBRATED_TEMPERATURE_BUFFER) ||
+         dPrimaryTemperature < (dSetpoint - CALIBRATED_TEMPERATURE_BUFFER) )
+    {
+        fixControlProbeOffset();
+        fixPrimaryProbeOffset();
+    }
+}
+
+// stable to unstable??? someone leaves door open for an extended period of time??
+
+
