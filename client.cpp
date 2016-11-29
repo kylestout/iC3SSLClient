@@ -535,6 +535,8 @@ void Client::receiveMessage()
             {
                 ui->label_calibration_state->setText("Calibrated!");
                 ui->led_calibrated->setPixmap(m_ledOFF);
+                ui->button_auto_cal->setText("Finished!");
+                ui->button_auto_cal->setEnabled(false);
             }
             else
             {

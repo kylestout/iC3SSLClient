@@ -18,7 +18,7 @@ CalibrationManager::CalibrationManager(Client *pClient,
     m_tFifteenMinuteTimer.start(FIFTEEN_MINUTES);
 
     connect(&m_tUpdateTemperatureValuesTimer, SIGNAL(timeout()), this, SLOT(slot_UpdateTemperatureValuesTimeout()));
-    m_tCompressorStateCheckTimer.start(ONE_MINUTE);
+    m_tUpdateTemperatureValuesTimer.start(ONE_MINUTE);
 }
 
 CalibrationManager::~CalibrationManager()
@@ -43,8 +43,6 @@ void CalibrationManager::slot_FifteenMinuteTimeout()
             setCalibrationState(eCALIBRATION_STATE_TEMPERATURE_STABLE);
 
             fixControlProbeOffset();
-
-            fixPrimaryProbeOffset();
 
             return;
         }
@@ -140,6 +138,11 @@ void CalibrationManager::slot_UpdateTemperatureValuesTimeout()
     m_dFlukeChannel1Temperature = m_pClient->getFlukeTemp1();
     m_dRTD4_OffsetValue = m_pClient->getControlOffset();
     m_dRTD5_OffsetValue = m_pClient->getPrimaryOffset();
+
+//    qDebug() << "m_dControlTemperature: " << m_dControlTemperature;
+//    qDebug() << "m_dFlukeChannel1Temperature: " << m_dFlukeChannel1Temperature;
+//    qDebug() << "m_dRTD4_OffsetValue: " << m_dRTD4_OffsetValue;
+//    qDebug() << "m_dRTD5_OffsetValue: " << m_dRTD5_OffsetValue;
 }
 
 eCalibrationStates CalibrationManager::getCalibrationState()
@@ -270,14 +273,6 @@ void CalibrationManager::checkIfCalibrated()
         {
             bCalibrated = false;
         }
-        if ( m_CycleDataList[i].dTempEnd > (dSetpoint + CALIBRATED_TEMPERATURE_BUFFER) )
-        {
-            bCalibrated = false;
-        }
-        if ( m_CycleDataList[i].dTempEnd < (dSetpoint - CALIBRATED_TEMPERATURE_BUFFER) )
-        {
-            bCalibrated = false;
-        }
     }
 
     // change system state if we are calibrated
@@ -315,7 +310,6 @@ void CalibrationManager::checkIfAdjustmentsNeedMade()
          dPrimaryTemperature < (dSetpoint - CALIBRATED_TEMPERATURE_BUFFER) )
     {
         fixControlProbeOffset();
-        fixPrimaryProbeOffset();
     }
 }
 
